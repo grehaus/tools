@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>grehaus — encrypt a write-up</title>
+
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg:#17181a; --bg-alt:#1c1d20; --bg-term:#101112; --bg-chip:#0c0d0e;
+    --border:#2b2c2f; --border-hi:#3d3f43;
+    --text:#cfd1d4; --text-dim:#8b8e93; --text-faint:#55585c; --bright:#f4f5f6;
+    --turquoise:#2fe1c9; --ochre:#ffc857; --rust:#e0553c;
+    --mono:'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+    --radius:6px;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--mono); font-size:15px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  main{ max-width:1100px; margin:0 auto; padding:40px 20px 80px; }
+  h1{ font-size:15px; color:var(--bright); margin:0 0 4px; font-weight:700; }
+  .sub{ color:var(--text-faint); font-size:13px; margin:0 0 8px; }
+  .warn{
+    color: var(--ochre); font-size: 13px; margin: 0 0 28px;
+    background: var(--bg-chip); border: 1px solid var(--border-hi);
+    border-radius: var(--radius); padding: 10px 14px;
+  }
+
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  @media (max-width:800px){ .row2{ grid-template-columns:1fr; } }
+
+  label{
+    display:block; font-size:11px; text-transform:uppercase; letter-spacing:.1em;
+    color:var(--text-faint); margin-bottom:6px;
+  }
+  .field{ margin-bottom:20px; }
+  textarea, input[type="text"], input[type="password"]{
+    width:100%; background:var(--bg-term); color:var(--text);
+    border:1px solid var(--border); border-radius:var(--radius);
+    font-family:var(--mono); font-size:13.5px; padding:12px 14px;
+    resize:vertical;
+  }
+  textarea:focus, input:focus{ outline:2px solid var(--turquoise); outline-offset:1px; border-color:var(--border-hi); }
+  textarea#plaintext{ height:480px; }
+  textarea#output{ height:480px; }
+
+  .pw-row{ display:flex; gap:12px; align-items:flex-end; margin-bottom: 20px; }
+  .pw-row .field{ flex:1; margin-bottom:0; }
+
+  button#encryptBtn{
+    font-family:var(--mono); font-size:14px; color:var(--bg);
+    background:var(--turquoise); border:none; font-weight:700;
+    padding:11px 20px; border-radius:var(--radius); cursor:pointer;
+  }
+  button#encryptBtn:hover{ opacity:.88; }
+  button#encryptBtn:disabled{ opacity:.5; cursor:default; }
+
+  button#copyBtn{
+    font-family:var(--mono); font-size:13px; color:var(--text);
+    background:var(--bg-term); border:1px solid var(--border);
+    padding:8px 14px; border-radius:var(--radius); cursor:pointer;
+    margin-top:10px; transition:border-color .15s, color .15s;
+  }
+  button#copyBtn:hover{ border-color:var(--turquoise); color:var(--turquoise); }
+  button#copyBtn.copied{ border-color:var(--turquoise); color:var(--turquoise); }
+
+  .status{ font-size:12.5px; color:var(--text-dim); margin-top:8px; min-height:18px; }
+  .status.ok{ color:var(--turquoise); }
+</style>
+</head>
+<body>
+<main>
+  <h1>encrypt a write-up</h1>
+  <p class="sub">guest@grehaus ~/tools — turns a content.md into a content.enc blob</p>
+  <p class="warn">This tool runs entirely in your browser — nothing is uploaded anywhere. Still: don't commit the plaintext content.md for a protected write-up, only the content.enc this produces.</p>
+
+  <div class="row2">
+    <div>
+      <div class="field">
+        <label for="plaintext">Your content.md (paste the full file, frontmatter included)</label>
+        <textarea id="plaintext" placeholder="---&#10;source: ...&#10;title: ...&#10;---&#10;&#10;## [01] ..."></textarea>
+      </div>
+
+      <div class="pw-row">
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" placeholder="a strong, unique passphrase">
+        </div>
+        <div class="field">
+          <label for="password2">Confirm</label>
+          <input type="password" id="password2" placeholder="type it again">
+        </div>
+      </div>
+
+      <button id="encryptBtn">Encrypt →</button>
+      <p class="status" id="status"></p>
+    </div>
+
+    <div>
+      <div class="field">
+        <label for="output">content.enc (save this exact text as content.enc)</label>
+        <textarea id="output" readonly placeholder="Output appears here after encrypting."></textarea>
+      </div>
+      <button id="copyBtn">copy to clipboard</button>
+    </div>
+  </div>
+</main>
+
+<script>
+  const plaintextEl = document.getElementById('plaintext');
+  const passwordEl = document.getElementById('password');
+  const password2El = document.getElementById('password2');
+  const encryptBtn = document.getElementById('encryptBtn');
+  const outputEl = document.getElementById('output');
+  const copyBtn = document.getElementById('copyBtn');
+  const statusEl = document.getElementById('status');
+
+  const PBKDF2_ITERATIONS = 250000;
+
+  function bytesToB64(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  }
+
+  async function deriveKey(password, salt) {
+    const baseKey = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt']
+    );
+  }
+
+  async function encrypt(plaintext, password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, salt);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext)
+    );
+    return JSON.stringify({
+      salt: bytesToB64(salt),
+      iv: bytesToB64(iv),
+      data: bytesToB64(ciphertext)
+    }, null, 2);
+  }
+
+  encryptBtn.addEventListener('click', async () => {
+    statusEl.textContent = '';
+    statusEl.className = 'status';
+
+    const plaintext = plaintextEl.value;
+    const password = passwordEl.value;
+    const password2 = password2El.value;
+
+    if (!plaintext.trim()) { statusEl.textContent = 'Paste your content.md first.'; return; }
+    if (!password) { statusEl.textContent = 'Enter a password.'; return; }
+    if (password !== password2) { statusEl.textContent = "Passwords don't match."; return; }
+    if (password.length < 8) { statusEl.textContent = 'Use a longer password — short ones are easy to brute-force offline.'; return; }
+
+    encryptBtn.disabled = true;
+    encryptBtn.textContent = 'encrypting…';
+    try {
+      const result = await encrypt(plaintext, password);
+      outputEl.value = result;
+      statusEl.textContent = 'Done — copy the output and save it as content.enc.';
+      statusEl.className = 'status ok';
+    } catch (e) {
+      statusEl.textContent = 'Encryption failed: ' + e.message;
+    } finally {
+      encryptBtn.disabled = false;
+      encryptBtn.textContent = 'Encrypt →';
+    }
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    if (!outputEl.value) return;
+    try {
+      await navigator.clipboard.writeText(outputEl.value);
+      copyBtn.textContent = 'copied ✓';
+      copyBtn.classList.add('copied');
+      setTimeout(() => { copyBtn.textContent = 'copy to clipboard'; copyBtn.classList.remove('copied'); }, 1500);
+    } catch (e) {
+      outputEl.select();
+      alert('Copy failed — text is selected, use Ctrl/Cmd+C.');
+    }
+  });
+</script>
+</body>
+</html>
